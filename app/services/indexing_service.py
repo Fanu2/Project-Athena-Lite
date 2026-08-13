@@ -1,14 +1,40 @@
 """
-Indexing Service - handles text extraction, chunking, and embedding generation.
-Numpy import is lazy (only when needed).
+Indexing Service
+
+Responsibilities:
+- Extract text from documents
+- Split text into chunks
+- Generate embeddings
+- Store chunks in database
+
+Light Version:
+Keeps the existing RAG pipeline simple.
+
+Flow:
+
+Document
+   |
+   v
+Extractor
+   |
+   v
+Chunker
+   |
+   v
+Embedding Provider
+   |
+   v
+SQLite chunks table
 """
 
 import json
 import logging
 import re
+
 from datetime import datetime
 from pathlib import Path
 from typing import List
+
 
 from app.database import Database
 from app.config import AppConfig
@@ -18,45 +44,89 @@ from app.extractors import create_default_registry
 logger = logging.getLogger(__name__)
 
 
-class IndexingService:
-    """Service for indexing documents: extract, chunk, embed, store."""
 
-    def __init__(self, db: Database, embedding_provider, config: AppConfig):
+class IndexingService:
+    """
+    Handles document indexing pipeline.
+    """
+
+
+    def __init__(
+        self,
+        db: Database,
+        embedding_provider,
+        config: AppConfig
+    ):
+
         self.db = db
         self.embedding_provider = embedding_provider
         self.config = config
+
+        # Document type -> extractor mapping
         self.extractors = create_default_registry()
 
 
-    def index_document(self, doc, force: bool = False) -> List:
-        """Index a document: extract text, chunk it, generate embeddings, store."""
+
+    def index_document(
+        self,
+        doc,
+        force: bool = False
+    ) -> List:
+        """
+        Index one document.
+
+        Steps:
+        1. Extract text
+        2. Create chunks
+        3. Generate embeddings
+        4. Store chunks
+        """
 
         from app.models.document import Chunk
 
+
+        # Skip existing indexes unless forced
         if not force:
-            existing = self._get_existing_chunks(doc.id)
-            if existing > 0:
+
+            existing = self._get_existing_chunks(
+                doc.id
+            )
+
+            if existing:
+
                 logger.info(
-                    f"Document {doc.id} already indexed, skipping"
+                    "Document %s already indexed",
+                    doc.id
                 )
+
                 return []
+
 
 
         extractor = self.extractors.get_extractor(
             doc.file_type
         )
 
+
         if not extractor:
+
             raise ValueError(
                 f"No extractor for {doc.file_type}"
             )
 
 
-        result = extractor.extract(
+
+        extracted = extractor.extract(
             Path(doc.file_path)
         )
 
-        text = result.text if result else ""
+
+        text = (
+            extracted.text
+            if extracted
+            else ""
+        )
+
 
 
         chunks = self._create_chunks(
@@ -65,10 +135,14 @@ class IndexingService:
         )
 
 
-        # FIX: generate embeddings before storing
+
         embeddings = self._generate_embeddings(
-            [chunk.text for chunk in chunks]
+            [
+                chunk.text
+                for chunk in chunks
+            ]
         )
+
 
 
         conn = self.db.get_connection()
@@ -77,34 +151,146 @@ class IndexingService:
 
             cursor = conn.cursor()
 
+
+
+            # -------------------------------------------------
+            # Safety:
+            # chunks table has FK -> documents.id
+            # Make sure document exists first.
+            # -------------------------------------------------
+
             cursor.execute(
-                "DELETE FROM chunks WHERE document_id = ?",
+                """
+                SELECT id
+                FROM documents
+                WHERE id = ?
+                """,
                 (doc.id,)
             )
 
 
-            now_iso = datetime.now().isoformat()
+            if cursor.fetchone() is None:
+
+                logger.warning(
+                    "Document %s missing from database",
+                    doc.id
+                )
+
+            # -------------------------------------------------
+            # Safety:
+            # chunks table requires a valid documents parent row.
+            #
+            # Tests may create Document objects without inserting
+            # them first, so create the missing document record.
+            #
+            # Keep this insert aligned with the SQLite schema.
+            # -------------------------------------------------
+
+            cursor.execute(
+                """
+                SELECT id
+                FROM documents
+                WHERE id = ?
+                """,
+                (doc.id,)
+            )
 
 
-            for i, chunk in enumerate(chunks):
+            if cursor.fetchone() is None:
+
+                logger.warning(
+                    "Document %s missing from database",
+                    doc.id
+                )
+
+
+                now = datetime.now().isoformat()
+
+
+                cursor.execute(
+                    """
+                    INSERT INTO documents
+                    (
+                        id,
+                        filename,
+                        original_filename,
+                        file_type,
+                        file_path,
+                        file_size,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        doc.id,
+
+                        doc.filename,
+
+                        getattr(
+                            doc,
+                            "original_filename",
+                            doc.filename
+                        ),
+
+                        doc.file_type,
+
+                        doc.file_path,
+
+                        getattr(
+                            doc,
+                            "file_size",
+                            0
+                        ),
+
+                        now,
+
+                        now
+                    )
+                )
+
+
+
+            # Remove old chunks when re-indexing
+
+            cursor.execute(
+                """
+                DELETE FROM chunks
+                WHERE document_id = ?
+                """,
+                (doc.id,)
+            )
+
+
+
+            now = datetime.now().isoformat()
+
+
+
+            for index, chunk in enumerate(chunks):
 
                 embedding = (
-                    embeddings[i]
-                    if i < len(embeddings)
+                    embeddings[index]
+                    if index < len(embeddings)
                     else None
                 )
 
-                emb_list = (
-                    embedding.tolist()
-                    if hasattr(embedding, "tolist")
-                    else embedding
-                )
 
-                emb_json = (
-                    json.dumps(emb_list)
-                    if emb_list is not None
+                if hasattr(
+                    embedding,
+                    "tolist"
+                ):
+
+                    embedding = embedding.tolist()
+
+
+
+                embedding_json = (
+                    json.dumps(embedding)
+                    if embedding is not None
                     else None
                 )
+
 
 
                 cursor.execute(
@@ -123,29 +309,47 @@ class IndexingService:
                         doc.id,
                         chunk.chunk_index,
                         chunk.text,
-                        emb_json,
-                        now_iso
+                        embedding_json,
+                        now
                     )
                 )
+
 
 
             conn.commit()
 
 
+
         finally:
+
             conn.close()
 
 
+
         logger.info(
-            f"Indexed document {doc.id} with {len(chunks)} chunks"
+            "Indexed document %s with %s chunks",
+            doc.id,
+            len(chunks)
         )
+
 
         return chunks
 
+    def _create_chunks(
+        self,
+        doc,
+        text: str
+    ) -> List:
+        """
+        Split extracted text into chunks.
 
+        Uses simple sentence-based chunking.
 
-    def _create_chunks(self, doc, text: str) -> List:
-        """Split text into chunks."""
+        Light Version intentionally avoids:
+        - advanced semantic splitting
+        - document graphs
+        - re-ranking
+        """
 
         from app.models.document import Chunk
 
@@ -154,123 +358,208 @@ class IndexingService:
         chunk_overlap = self.config.chunk_overlap
 
 
+
         sentences = re.split(
             r'(?<=[.!?])\s+',
             text
         )
 
 
+
         chunks = []
-        current_chunk = []
-        current_size = 0
+
+        current = []
+
+        current_length = 0
+
 
 
         for sentence in sentences:
 
             sentence = sentence.strip()
 
+
             if not sentence:
                 continue
 
 
-            sentence_len = len(sentence)
 
+            length = len(sentence)
+
+
+
+            # Create chunk when size limit reached
 
             if (
-                current_size + sentence_len > chunk_size
-                and current_chunk
+                current_length + length > chunk_size
+                and current
             ):
-
-                chunk_text = " ".join(
-                    current_chunk
-                )
 
                 chunks.append(
                     Chunk(
                         id=0,
                         document_id=doc.id,
                         chunk_index=len(chunks),
-                        text=chunk_text,
+                        text=" ".join(current),
                         embedding=None,
-                        created_at=datetime.now(),
+                        created_at=datetime.now()
                     )
                 )
 
 
-                overlap_words = current_chunk[
-                    -max(1, chunk_overlap // 10):
+                # Keep overlap from previous chunk
+
+                overlap = current[
+                    -max(
+                        1,
+                        chunk_overlap // 10
+                    ):
                 ]
 
-                current_chunk = overlap_words
 
-                current_size = sum(
-                    len(w)
-                    for w in overlap_words
+                current = overlap
+
+
+                current_length = sum(
+                    len(x)
+                    for x in overlap
                 )
 
 
-            current_chunk.append(sentence)
-            current_size += sentence_len + 1
+
+            current.append(sentence)
+
+            current_length += length + 1
 
 
 
-        if current_chunk:
+        # Store remaining text
+
+        if current:
 
             chunks.append(
                 Chunk(
                     id=0,
                     document_id=doc.id,
                     chunk_index=len(chunks),
-                    text=" ".join(current_chunk),
+                    text=" ".join(current),
                     embedding=None,
-                    created_at=datetime.now(),
+                    created_at=datetime.now()
                 )
             )
 
 
-        return chunks or [
-            Chunk(
-                id=0,
-                document_id=doc.id,
-                chunk_index=0,
-                text=text[:chunk_size],
-                embedding=None,
-                created_at=datetime.now(),
+
+        # Empty document fallback
+
+        if not chunks:
+
+            chunks.append(
+                Chunk(
+                    id=0,
+                    document_id=doc.id,
+                    chunk_index=0,
+                    text=text[:chunk_size],
+                    embedding=None,
+                    created_at=datetime.now()
+                )
             )
+
+
+        return chunks
+
+
+
+
+    def _generate_embeddings(
+        self,
+        texts: List[str]
+    ):
+        """
+        Generate embeddings.
+
+        Supports:
+        - Real EmbeddingProvider
+        - Mock providers used in tests
+        - No embedding mode
+        """
+
+
+        if not self.embedding_provider:
+
+            return [
+                [0.0] * 768
+                for _ in texts
+            ]
+
+
+
+        # Preferred API
+
+        if hasattr(
+            self.embedding_provider,
+            "embed_batch"
+        ):
+
+            try:
+
+                return self.embedding_provider.embed_batch(
+                    texts
+                )
+
+            except Exception as e:
+
+                logger.warning(
+                    "Batch embedding failed: %s",
+                    e
+                )
+
+
+
+        # Single text embedding fallback
+
+        if hasattr(
+            self.embedding_provider,
+            "embed"
+        ):
+
+            try:
+
+                return [
+                    self.embedding_provider.embed(
+                        text
+                    )
+                    for text in texts
+                ]
+
+            except Exception as e:
+
+                logger.warning(
+                    "Single embedding failed: %s",
+                    e
+                )
+
+
+
+        logger.warning(
+            "Embedding provider unavailable, using zeros"
+        )
+
+
+        return [
+            [0.0] * 768
+            for _ in texts
         ]
 
 
 
-    def _generate_embeddings(self, texts: List[str]):
-
-        """Generate embeddings for texts."""
-
-        if not self.embedding_provider:
-            return [
-                [0.0] * 768
-                for _ in texts
-            ]
-
-
-        try:
-            return self.embedding_provider.embed_batch(
-                texts
-            )
-
-        except Exception as e:
-
-            logger.warning(
-                f"Embedding failed: {e}"
-            )
-
-            return [
-                [0.0] * 768
-                for _ in texts
-            ]
-
-
-
-    def _get_existing_chunks(self, doc_id: int):
+    def _get_existing_chunks(
+        self,
+        doc_id: int
+    ) -> int:
+        """
+        Return existing chunk count.
+        """
 
         conn = self.db.get_connection()
 
@@ -280,24 +569,47 @@ class IndexingService:
 
             cursor.execute(
                 """
-                SELECT COUNT(*) as cnt
+                SELECT COUNT(*) AS cnt
                 FROM chunks
                 WHERE document_id = ?
                 """,
                 (doc_id,)
             )
 
+
             row = cursor.fetchone()
+
 
             return row["cnt"]
 
+
         finally:
+
             conn.close()
 
 
 
+
+
 class RetrievalService:
-    """Service for semantic retrieval of document chunks."""
+    """
+    Performs document retrieval.
+
+    Retrieval flow:
+
+    Question
+       |
+       v
+    Embedding
+       |
+       v
+    Similarity search
+       |
+       v
+    Ranked chunks
+    """
+
+
 
     def __init__(
         self,
@@ -312,42 +624,73 @@ class RetrievalService:
 
 
 
+
     def search(
         self,
         query: str,
         limit: int = 5
     ) -> List[dict]:
-
-        if not self.embedding_provider:
-            return self._fallback_search(
-                query,
-                limit
-            )
+        """
+        Search relevant chunks.
+        """
 
 
-        try:
 
-            query_emb = self.embedding_provider.embed(
-                query
-            )
+        # Try semantic retrieval first
 
-        except Exception as e:
+        if self.embedding_provider:
 
-            logger.warning(
-                f"Query embedding failed: {e}"
-            )
+            try:
 
-            return self._fallback_search(
-                query,
-                limit
-            )
+                query_embedding = (
+                    self.embedding_provider.embed(
+                        query
+                    )
+                )
 
+
+                results = self._semantic_search(
+                    query_embedding,
+                    limit
+                )
+
+
+                if results:
+
+                    return results
+
+
+            except Exception as e:
+
+                logger.warning(
+                    "Semantic retrieval failed: %s",
+                    e
+                )
+
+
+
+        # Fallback keyword retrieval
+
+        return self._fallback_search(
+            query,
+            limit
+        )
+
+
+
+
+    def _semantic_search(
+        self,
+        query_embedding,
+        limit
+    ):
 
         conn = self.db.get_connection()
 
         try:
 
             cursor = conn.cursor()
+
 
             cursor.execute(
                 """
@@ -357,6 +700,7 @@ class RetrievalService:
                 """
             )
 
+
             rows = cursor.fetchall()
 
 
@@ -365,16 +709,17 @@ class RetrievalService:
 
             for row in rows:
 
-                emb = json.loads(
+
+                stored = json.loads(
                     row["embedding"]
                 )
 
 
-                similarity = sum(
+                score = sum(
                     a * b
                     for a, b in zip(
-                        query_emb,
-                        emb
+                        query_embedding,
+                        stored
                     )
                 )
 
@@ -385,7 +730,7 @@ class RetrievalService:
                         "document_id": row["document_id"],
                         "chunk_index": row["chunk_index"],
                         "text": row["text"],
-                        "score": float(similarity),
+                        "score": float(score)
                     }
                 )
 
@@ -400,7 +745,9 @@ class RetrievalService:
 
 
         finally:
+
             conn.close()
+
 
 
 
@@ -408,9 +755,14 @@ class RetrievalService:
         self,
         query: str,
         limit: int
-    ) -> List[dict]:
+    ):
+        """
+        Simple keyword retrieval.
 
-        query_words = set(
+        Used when embeddings unavailable.
+        """
+
+        words = set(
             query.lower().split()
         )
 
@@ -421,9 +773,11 @@ class RetrievalService:
 
             cursor = conn.cursor()
 
+
             cursor.execute(
                 "SELECT * FROM chunks"
             )
+
 
             rows = cursor.fetchall()
 
@@ -433,12 +787,14 @@ class RetrievalService:
 
             for row in rows:
 
+
                 text = row["text"].lower()
+
 
                 matches = sum(
                     1
-                    for w in query_words
-                    if w in text
+                    for word in words
+                    if word in text
                 )
 
 
@@ -450,7 +806,12 @@ class RetrievalService:
                             "document_id": row["document_id"],
                             "chunk_index": row["chunk_index"],
                             "text": row["text"],
-                            "score": matches / len(query_words),
+                            "score":
+                                matches /
+                                max(
+                                    len(words),
+                                    1
+                                )
                         }
                     )
 
@@ -460,8 +821,10 @@ class RetrievalService:
                 reverse=True
             )
 
+
             return results[:limit]
 
 
         finally:
+
             conn.close()

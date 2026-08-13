@@ -194,7 +194,7 @@ class ChatWidget(QWidget):
 
 
 
-    def add_message(self, role, content=None):
+    def add_message(self, role, content=None, sources=None):
 
         """
         Add message.

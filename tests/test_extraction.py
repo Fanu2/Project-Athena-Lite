@@ -104,15 +104,33 @@ class TestTextExtractor:
         assert "Café" in result.text
 
     def test_extract_large_file(self, tmp_path):
-        """Test that large files are handled correctly."""
+        """
+        Test that large text files are handled correctly.
+
+        Ensures extractor does not truncate content.
+        """
+
         txt_file = tmp_path / "large.txt"
 
-        large_text = "Line " + " ".join(str(i) for i in range(1000))
-        txt_file.write_text(large_text)
+        # Create content larger than 10,000 characters
+        large_text = (
+            "This is a test line with sample content. "
+            * 1000
+        )
 
-        result = TextExtractor().extract(txt_file)
+        txt_file.write_text(
+            large_text,
+            encoding="utf-8"
+        )
 
+        result = TextExtractor().extract(
+            txt_file
+        )
+
+        # Full content must be preserved
         assert len(result.full_text) > 10000
+
+        # Single line because we did not add newline characters
         assert result.metadata["line_count"] == 1
 
 

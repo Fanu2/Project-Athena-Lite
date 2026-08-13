@@ -1,10 +1,24 @@
 """
 Chat Service - handles RAG question answering.
+
+Light Version responsibilities:
+- Conversation persistence
+- User/assistant message storage
+- Retrieval augmented answering
+- Ollama chat generation
+- Source metadata for citations
+
+Intentionally NOT included:
+- Agents
+- Memory system
+- Plugins
+- Advanced workflows
 """
 
 import logging
 from datetime import datetime
-from typing import List
+from typing import List, Dict, Any
+
 
 from app.database import Database
 from app.config import AppConfig
@@ -16,7 +30,23 @@ logger = logging.getLogger(__name__)
 
 class ChatService:
     """
-    Service for handling chat conversations and RAG question answering.
+    Main chat application service.
+
+    Flow:
+
+    User Question
+          |
+          v
+      RetrievalService
+          |
+          v
+      Context Builder
+          |
+          v
+        Ollama
+          |
+          v
+      Answer + Sources
     """
 
 
@@ -35,25 +65,39 @@ class ChatService:
 
 
 
+    # -------------------------------------------------
+    # Conversation Management
+    # -------------------------------------------------
+
     def create_new_conversation(
         self,
-        title="New Conversation"
-    ):
+        title: str = "New Conversation"
+    ) -> int:
+        """Create and return a conversation ID."""
 
         now = datetime.now().isoformat()
 
         conn = self.db.get_connection()
 
         try:
+
             cursor = conn.cursor()
 
             cursor.execute(
                 """
                 INSERT INTO conversations
-                (title, created_at, updated_at)
+                (
+                    title,
+                    created_at,
+                    updated_at
+                )
                 VALUES (?, ?, ?)
                 """,
-                (title, now, now)
+                (
+                    title,
+                    now,
+                    now
+                )
             )
 
             conn.commit()
@@ -65,7 +109,8 @@ class ChatService:
 
 
 
-    def list_conversations(self):
+    def list_conversations(self) -> List[dict]:
+        """Return all conversations."""
 
         conn = self.db.get_connection()
 
@@ -85,12 +130,12 @@ class ChatService:
 
             return [
                 {
-                    "id": r["id"],
-                    "title": r["title"],
-                    "created_at": r["created_at"],
-                    "updated_at": r["updated_at"]
+                    "id": row["id"],
+                    "title": row["title"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
                 }
-                for r in rows
+                for row in rows
             ]
 
         finally:
@@ -98,12 +143,64 @@ class ChatService:
 
 
 
-    def _add_message(
+    def get_conversation_history(
         self,
-        conversation_id,
-        role,
-        content
-    ):
+        conv_id: int
+    ) -> List[dict]:
+        """
+        Return messages for a conversation.
+
+        Used by:
+        - UI history loading
+        - Tests
+        """
+
+        conn = self.db.get_connection()
+
+        try:
+
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                SELECT *
+                FROM messages
+                WHERE conversation_id = ?
+                ORDER BY created_at ASC
+                """,
+                (conv_id,)
+            )
+
+            rows = cursor.fetchall()
+
+            return [
+                {
+                    "id": row["id"],
+                    "conversation_id": row["conversation_id"],
+                    "role": row["role"],
+                    "content": row["content"],
+                    "created_at": row["created_at"],
+                }
+                for row in rows
+            ]
+
+        finally:
+            conn.close()
+
+
+
+    def _add_conversation_message(
+        self,
+        conv_id: int,
+        role: str,
+        content: str
+    ) -> int:
+        """
+        Save a message.
+
+        Kept as public internal API because
+        existing UI/tests use this method.
+        """
 
         now = datetime.now().isoformat()
 
@@ -116,16 +213,35 @@ class ChatService:
             cursor.execute(
                 """
                 INSERT INTO messages
-                (conversation_id, role, content, created_at)
+                (
+                    conversation_id,
+                    role,
+                    content,
+                    created_at
+                )
                 VALUES (?, ?, ?, ?)
                 """,
                 (
-                    conversation_id,
+                    conv_id,
                     role,
                     content,
                     now
                 )
             )
+
+
+            cursor.execute(
+                """
+                UPDATE conversations
+                SET updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    now,
+                    conv_id
+                )
+            )
+
 
             conn.commit()
 
@@ -136,40 +252,55 @@ class ChatService:
 
 
 
+    def _add_message(
+        self,
+        conversation_id,
+        role,
+        content
+    ):
+        """Compatibility wrapper."""
+
+        return self._add_conversation_message(
+            conversation_id,
+            role,
+            content
+        )
+
+
+
     # -------------------------------------------------
-    # UI ENTRY POINT
+    # UI Entry Point
     # -------------------------------------------------
 
     def ask(
         self,
         question: str,
         conversation_id=None
-    ):
-
+    ) -> dict:
         """
-        Called by Chat UI.
+        Main entry point from Chat UI.
         """
 
         if conversation_id is None:
 
-            conversation_id = (
-                self.create_new_conversation(
-                    "Athena Chat"
-                )
+            conversation_id = self.create_new_conversation(
+                "Athena Chat"
             )
 
 
-        self._add_message(
+        self._add_conversation_message(
             conversation_id,
             "user",
             question
         )
 
 
-        result = self.answer(question)
+        result = self.answer(
+            question
+        )
 
 
-        self._add_message(
+        self._add_conversation_message(
             conversation_id,
             "assistant",
             result["answer"]
@@ -181,13 +312,16 @@ class ChatService:
 
 
     # -------------------------------------------------
-    # RAG ENGINE
+    # RAG Answering
     # -------------------------------------------------
 
     def answer(
         self,
         question: str
-    ):
+    ) -> dict:
+        """
+        Perform retrieval augmented answering.
+        """
 
         results = self.retrieval_service.search(
             question,
@@ -199,26 +333,28 @@ class ChatService:
 
             return {
                 "answer":
-                (
-                    "I could not find relevant documents. "
-                    "Please import documents first."
-                ),
+                    (
+                        "I don't have any indexed documents "
+                        "to answer this question. "
+                        "Please import and index some documents first."
+                    ),
                 "sources": []
             }
 
 
 
-        context = self._build_context(results)
+        context = self._build_context(
+            results
+        )
 
 
-
+        # No LLM fallback
         if not self.llm_client:
 
             return {
                 "answer":
-                    self._mock_answer(
-                        context
-                    ),
+                    self._mock_answer(context),
+
                 "sources":
                     self._format_sources(results)
             }
@@ -226,7 +362,7 @@ class ChatService:
 
 
         prompt = f"""
-Answer using only this context.
+Answer using only the supplied context.
 
 Context:
 
@@ -245,8 +381,8 @@ Question:
                 self.config.ollama_model,
                 [
                     {
-                        "role":"user",
-                        "content":prompt
+                        "role": "user",
+                        "content": prompt
                     }
                 ],
                 stream=False
@@ -255,8 +391,14 @@ Question:
 
             answer = (
                 response.get("response")
-                or (response.get("message") or {}).get("content")
-                or ""
+                or
+                response.get(
+                    "message",
+                    {}
+                ).get(
+                    "content",
+                    ""
+                )
             )
 
 
@@ -269,11 +411,9 @@ Question:
             )
 
 
-
         return {
             "answer": answer,
-            "sources":
-                self._format_sources(results)
+            "sources": self._format_sources(results)
         }
 
 
@@ -281,17 +421,18 @@ Question:
     def _build_context(
         self,
         results
-    ):
+    ) -> str:
+        """Create LLM context."""
 
-        parts=[]
+        parts = []
 
-        for i,r in enumerate(results):
+        for index, result in enumerate(results):
 
             parts.append(
                 f"""
-[Source {i+1}]
+[Source {index + 1}]
 
-{r['text']}
+{result['text']}
 """
             )
 
@@ -301,13 +442,13 @@ Question:
 
     def _mock_answer(
         self,
-        context
-    ):
+        context: str
+    ) -> str:
+        """Fallback when no LLM is available."""
 
         return (
             "I found this information in your documents:\n\n"
-            +
-            context[:2000]
+            + context[:2000]
             +
             "\n\n(Source-based response)"
         )
@@ -317,28 +458,38 @@ Question:
     def _format_sources(
         self,
         results
-    ):
+    ) -> List[dict]:
+        """
+        Convert retrieval results into UI citation format.
+        """
 
-        sources=[]
+        sources = []
 
-        for r in results:
+
+        for result in results:
 
             sources.append(
                 {
+                    "document_name":
+                        result.get(
+                            "document_name",
+                            f"Document {result['document_id']}"
+                        ),
+
                     "document_id":
-                        r["document_id"],
+                        result["document_id"],
 
                     "chunk_index":
-                        r["chunk_index"],
+                        result["chunk_index"],
 
                     "score":
-                        r.get(
+                        result.get(
                             "score",
                             0
                         ),
 
                     "text_preview":
-                        r["text"][:200]
+                        result["text"][:200],
                 }
             )
 

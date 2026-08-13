@@ -1,163 +1,254 @@
 """
 Text and Markdown extractors.
-Ext extracts plain text and markdown files.
+
+Light Version responsibilities:
+- Extract plain text files
+- Extract Markdown files
+- Return document text
+- Provide basic metadata
+- Track Markdown headings for UI/tests
 """
 
 import logging
+import re
 from pathlib import Path
-from typing import List
 
-from app.extractors.base import DocumentExtractor, ExtractionResult, PageText
+from app.extractors.base import (
+    DocumentExtractor,
+    ExtractionResult,
+    PageText,
+    DocumentExtractionError,
+)
+
 
 logger = logging.getLogger(__name__)
 
 
 class TextExtractor(DocumentExtractor):
     """
-    Extracts text from plain text files (.txt, .text).
+    Extracts plain text files.
+
+    Supported:
+    - .txt
+    - .text
     """
 
-    supported_extensions = [".txt", ".text"]
+    supported_extensions = [
+        ".txt",
+        ".text",
+    ]
 
-    def extract(self, file_path: Path) -> ExtractionResult:
+
+    def extract(
+        self,
+        file_path: Path
+    ) -> ExtractionResult:
         """
-        Extract text from a plain text file.
-
-        Args:
-            file_path: Path to the text file
-
-        Returns:
-            ExtractionResult with full text
+        Extract text content from a file.
         """
+
         if not file_path.exists():
-            raise FileNotFoundError(f"Text file not found: {file_path}")
+            raise FileNotFoundError(
+                f"Text file not found: {file_path}"
+            )
+
 
         try:
-            content = file_path.read_text(encoding="utf-8")
+            content = self._read_text(
+                file_path
+            )
 
-            pages = [
-                PageText(
-                    page_number=1,
-                    text=content,
-                    full_text=content,
-                )
-            ]
 
-            metadata = {
-                "title": file_path.stem,
-                "author": "",
-                "page_count": 1,
-            }
+            logger.info(
+                "Extracted text: %s (%s chars)",
+                file_path.name,
+                len(content)
+            )
 
-            logger.info(f"Extracted text: {file_path.name} ({len(content)} chars)")
 
             return ExtractionResult(
-                pages=pages,
+                pages=[
+                    PageText(
+                        page_number=1,
+                        text=content,
+                        full_text=content,
+                    )
+                ],
+
                 full_text=content,
+
                 metadata={
                     "title": file_path.stem,
                     "author": "",
                     "page_count": 1,
-                    "line_count": content.count('\n') + 1,
+                    "line_count": content.count("\n") + 1,
                 },
             )
 
-        except UnicodeDecodeError:
-            # Try with different encodings
-            for encoding in ["latin-1", "cp1252", "utf-16"]:
-                try:
-                    content = file_path.read_text(encoding=encoding)
-                    pages = [
-                        PageText(
-                            page_number=1,
-                            text=content,
-                            full_text=content,
-                        )
-                    ]
-                    return ExtractionResult(
-                        pages=pages,
-                        full_text=content,
-                        metadata=metadata,
-                    )
-                except UnicodeDecodeError:
-                    continue
-            raise DocumentExtractionError(f"Failed to decode text file: {file_path}")
+
         except Exception as e:
-            logger.error(f"Error extracting text {file_path}: {e}")
-            raise DocumentExtractionError(f"Failed to extract text: {e}") from e
+
+            logger.exception(e)
+
+            raise DocumentExtractionError(
+                f"Failed to extract text: {e}"
+            ) from e
+
+
+
+    def _read_text(
+        self,
+        file_path: Path
+    ) -> str:
+        """
+        Read text using fallback encodings.
+        """
+
+        for encoding in [
+            "utf-8",
+            "latin-1",
+            "cp1252",
+            "utf-16",
+        ]:
+
+            try:
+                return file_path.read_text(
+                    encoding=encoding
+                )
+
+            except UnicodeDecodeError:
+                continue
+
+
+        raise DocumentExtractionError(
+            f"Unable to decode file: {file_path}"
+        )
+
 
 
 class MarkdownExtractor(DocumentExtractor):
     """
-    Extracts text from Markdown files (.md, .markdown).
+    Extracts Markdown documents.
 
-    Markdown files are treated as plain text with a single page.
+    Supported:
+    - .md
+    - .markdown
+    - .mkd
+
+    Markdown is treated as normal text,
+    but headings are collected as sections.
     """
 
-    supported_extensions = [".md", ".markdown", ".mkd"]
+    supported_extensions = [
+        ".md",
+        ".markdown",
+        ".mkd",
+    ]
 
-    def extract(self, file_path: Path) -> ExtractionResult:
+
+    def extract(
+        self,
+        file_path: Path
+    ) -> ExtractionResult:
         """
-        Extract text from a Markdown file.
-
-        Args:
-            file_path: Path to the markdown file
-
-        Returns:
-            ExtractionResult with full text
+        Extract Markdown content.
         """
+
         if not file_path.exists():
-            raise FileNotFoundError(f"Markdown file not found: {file_path}")
+            raise FileNotFoundError(
+                f"Markdown file not found: {file_path}"
+            )
+
 
         try:
-            content = file_path.read_text(encoding="utf-8")
 
-            pages = [
-                PageText(
-                    page_number=1,
-                    text=content,
-                    full_text=content,
-                )
-            ]
+            content = self._read_markdown(
+                file_path
+            )
 
-            metadata = {
-                "title": file_path.stem,
-                "author": "",
-                "page_count": 1,
-            }
 
-            logger.info(f"Extracted markdown: {file_path.name} ({len(content)} chars)")
+            # Find Markdown headings
+            # Example:
+            # # Title
+            # ## Section
+            sections = re.findall(
+                r"^#+\s+(.+)$",
+                content,
+                re.MULTILINE,
+            )
+
+
+            logger.info(
+                "Extracted markdown: %s (%s chars)",
+                file_path.name,
+                len(content)
+            )
+
 
             return ExtractionResult(
-                pages=pages,
+
+                pages=[
+                    PageText(
+                        page_number=1,
+                        text=content,
+                        full_text=content,
+                    )
+                ],
+
                 full_text=content,
+
                 metadata={
+
                     "title": file_path.stem,
+
                     "author": "",
+
                     "page_count": 1,
-                    "line_count": content.count('\n') + 1,
+
+                    "line_count":
+                        content.count("\n") + 1,
+
+                    # Required by tests
+                    # and useful for future UI
+                    "section_count": sections,
                 },
             )
 
-        except UnicodeDecodeError:
-            for encoding in ["latin-1", "cp1252", "utf-16"]:
-                try:
-                    content = file_path.read_text(encoding=encoding)
-                    pages = [
-                        PageText(
-                            page_number=1,
-                            text=content,
-                            full_text=content,
-                        )
-                    ]
-                    return ExtractionResult(
-                        pages=pages,
-                        full_text=content,
-                        metadata=metadata,
-                    )
-                except UnicodeDecodeError:
-                    continue
-            raise DocumentExtractionError(f"Failed to decode markdown file: {file_path}")
+
         except Exception as e:
-            logger.error(f"Error extracting markdown {file_path}: {e}")
-            raise DocumentExtractionError(f"Failed to extract markdown: {e}") from e
+
+            logger.exception(e)
+
+            raise DocumentExtractionError(
+                f"Failed to extract markdown: {e}"
+            ) from e
+
+
+
+    def _read_markdown(
+        self,
+        file_path: Path
+    ) -> str:
+        """
+        Read Markdown with encoding fallback.
+        """
+
+        for encoding in [
+            "utf-8",
+            "latin-1",
+            "cp1252",
+            "utf-16",
+        ]:
+
+            try:
+                return file_path.read_text(
+                    encoding=encoding
+                )
+
+            except UnicodeDecodeError:
+                continue
+
+
+        raise DocumentExtractionError(
+            f"Unable to decode markdown: {file_path}"
+        )

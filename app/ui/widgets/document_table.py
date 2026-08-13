@@ -35,8 +35,8 @@ class DocumentTableWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Name", "Type", "Size", "Actions"])
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["Name", "Type", "Size", "Chunks", "Actions"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)
@@ -74,6 +74,9 @@ class DocumentTableWidget(QWidget):
             self.table.setItem(i, 0, QTableWidgetItem(doc.original_filename or doc.filename))
             self.table.setItem(i, 1, QTableWidgetItem(doc.file_type or "unknown"))
             self.table.setItem(i, 2, QTableWidgetItem(f"{doc.file_size / 1024:.1f} KB"))
+            # Show chunk count if available, otherwise "—"
+            chunk_text = doc.chunk_count if doc.chunk_count else "—"
+            self.table.setItem(i, 3, QTableWidgetItem(str(chunk_text)))
             action_item = QTableWidgetItem()
             action_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
             self.table.setItem(i, 3, action_item)

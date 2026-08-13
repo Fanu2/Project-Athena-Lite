@@ -2,12 +2,15 @@
 Main Window - Local AI Document Assistant
 
 Responsibilities:
-- Create the main application window
-- Initialize application services
-- Manage navigation between pages
-- Provide document import workflow
-- Connect chat UI with ChatService
-- Display application settings/status
+- Create main application window
+- Initialize backend services
+- Manage navigation
+- Import and index documents
+- Connect Chat UI with ChatService
+- Display application status
+
+Light Version:
+Only exposes existing backend capabilities.
 """
 
 import logging
@@ -34,15 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
-    """
-    Main application window.
-
-    Owns:
-    - database connection
-    - AI clients
-    - application services
-    - UI pages
-    """
+    """Main application window."""
 
     def __init__(
         self,
@@ -52,10 +47,8 @@ class MainWindow(QMainWindow):
         ollama_client,
         embedding_provider,
     ):
-
         super().__init__()
 
-        # Core application references
         self.app = app
         self.config = config
         self.db = db
@@ -74,19 +67,12 @@ class MainWindow(QMainWindow):
             750
         )
 
-        # Create backend services before UI
         self._create_services()
-
-        # Create application pages
         self._setup_ui()
 
 
     def _create_services(self):
-        """
-        Initialize application services.
-
-        Services are shared by all UI pages.
-        """
+        """Create application services."""
 
         from app.services import (
             DocumentService,
@@ -95,12 +81,10 @@ class MainWindow(QMainWindow):
             ChatService,
         )
 
-
         self.document_service = DocumentService(
             self.config.documents_dir,
             self.db
         )
-
 
         self.indexing_service = IndexingService(
             self.db,
@@ -108,13 +92,11 @@ class MainWindow(QMainWindow):
             self.config
         )
 
-
         self.retrieval_service = RetrievalService(
             self.db,
             self.embedding_provider,
             self.config
         )
-
 
         self.chat_service = ChatService(
             self.db,
@@ -125,19 +107,7 @@ class MainWindow(QMainWindow):
 
 
     def _setup_ui(self):
-        """
-        Build main window layout.
-
-        Structure:
-
-        Sidebar
-            |
-            +---- Documents
-            +---- Chat
-            +---- Settings
-
-        Content Area
-        """
+        """Create application pages."""
 
         container = QWidget()
 
@@ -145,13 +115,11 @@ class MainWindow(QMainWindow):
             container
         )
 
-
         self.navigation = NavigationWidget()
 
         self.navigation.page_changed.connect(
             self.change_page
         )
-
 
         layout.addWidget(
             self.navigation
@@ -201,31 +169,20 @@ class MainWindow(QMainWindow):
         self,
         index
     ):
-        """
-        Switch visible page.
-        """
+        """Change visible page safely."""
 
-        self.pages.setCurrentIndex(
-            index
-        )
+        if 0 <= index < self.pages.count():
+            self.pages.setCurrentIndex(index)
 
 
 
 class DocumentPage(QWidget):
-    """
-    Document management page.
-
-    Handles:
-    - importing files
-    - extracting text
-    - indexing documents
-    """
+    """Document import and indexing page."""
 
     def __init__(
         self,
         parent
     ):
-
         super().__init__()
 
         self.parent_window = parent
@@ -248,7 +205,6 @@ class DocumentPage(QWidget):
             self.import_documents
         )
 
-
         layout.addWidget(
             self.import_button
         )
@@ -262,9 +218,7 @@ class DocumentPage(QWidget):
 
 
     def import_documents(self):
-        """
-        Import selected documents and index them.
-        """
+        """Import files and index them."""
 
         files, _ = QFileDialog.getOpenFileNames(
             self,
@@ -276,16 +230,11 @@ class DocumentPage(QWidget):
 
             try:
 
-                doc = (
-                    self.parent_window
-                    .document_service
-                    .import_document(
-                        Path(file)
-                    )
+                doc = self.parent_window.document_service.import_document(
+                    Path(file)
                 )
 
 
-                # Index immediately after import
                 self.parent_window.indexing_service.index_document(
                     doc,
                     force=True
@@ -311,21 +260,19 @@ class DocumentPage(QWidget):
 
 
 class ChatPage(QWidget):
-    """
-    Chat interface page.
-
-    Sends user questions to ChatService
-    and displays answers.
-    """
+    """Chat interface connected to ChatService."""
 
     def __init__(
         self,
         parent
     ):
-
         super().__init__()
 
         self.parent_window = parent
+
+        # Store latest citations
+        self.last_sources = []
+
 
         layout = QVBoxLayout(
             self
@@ -349,23 +296,18 @@ class ChatPage(QWidget):
         self,
         text
     ):
-        """
-        Handle user questions.
-        """
+        """Send question to RAG service."""
 
         try:
 
-            # Display user question
             self.chat.add_message(
                 "user",
                 text
             )
 
 
-            result = (
-                self.parent_window
-                .chat_service
-                .answer(text)
+            result = self.parent_window.chat_service.answer(
+                text
             )
 
 
@@ -375,23 +317,23 @@ class ChatPage(QWidget):
             )
 
 
-            # Prevent blank assistant messages
             if not answer:
                 answer = (
-                    "I couldn't generate a response."
+                    "I could not generate a response."
                 )
+
+
+            # Store sources BEFORE displaying
+            self.last_sources = result.get(
+                "sources",
+                []
+            )
 
 
             self.chat.add_message(
                 "assistant",
-                answer
-            )
-
-
-            # Store retrieved sources for future citation UI
-            self.last_sources = result.get(
-                "sources",
-                []
+                answer,
+                sources=self.last_sources
             )
 
 
@@ -401,29 +343,20 @@ class ChatPage(QWidget):
 
             self.chat.add_message(
                 "assistant",
-                f"Error: {e}"
+                f"⚠ Error: {e}"
             )
 
 
 
 class SettingsPage(QWidget):
-    """
-    Application status page.
-
-    Displays:
-    - Ollama connection state
-    - active LLM model
-    - embedding model
-    """
+    """Application status display."""
 
     def __init__(
         self,
         parent
     ):
-
         super().__init__()
 
-        # Required because status display reads parent services/config
         self.parent_window = parent
 
 
@@ -433,24 +366,11 @@ class SettingsPage(QWidget):
 
 
         layout.addWidget(
-            QLabel(
-                "Settings"
-            )
+            QLabel("Settings")
         )
 
 
         status_box = QLabel()
-
-        status_box.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                padding: 8px;
-                background-color: #f8f9fa;
-                border: 1px solid #dee2e6;
-                border-radius: 4px;
-            }
-        """)
-
 
         connected = (
             self.parent_window.ollama_client
@@ -458,7 +378,7 @@ class SettingsPage(QWidget):
         )
 
 
-        ollama_status = (
+        status = (
             "Connected"
             if connected
             else "Disconnected"
@@ -476,14 +396,26 @@ class SettingsPage(QWidget):
             f"""
             <b>Ollama Status:</b>
             <font color="{color}">
-            {ollama_status}
+            {status}
             </font>
             <br>
-            <b>Active Chat Model:</b>
+            <b>Chat Model:</b>
             {self.parent_window.config.ollama_model}
             <br>
             <b>Embedding Model:</b>
             {self.parent_window.config.embedding_model}
+            """
+        )
+
+
+        status_box.setStyleSheet(
+            """
+            QLabel {
+                padding: 10px;
+                background: #f8f9fa;
+                border: 1px solid #dee2e6;
+                border-radius: 4px;
+            }
             """
         )
 
